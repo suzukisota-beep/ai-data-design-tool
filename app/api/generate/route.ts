@@ -4,6 +4,48 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+function stripCodeFence(text: string) {
+  return text
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
+function extractJsonText(text: string) {
+  const cleaned = stripCodeFence(text);
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+
+  if (start >= 0 && end > start) {
+    return cleaned.slice(start, end + 1);
+  }
+
+  return cleaned;
+}
+
+function objectToReadableText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+
+  if (Array.isArray(value)) {
+    return value.map((v) => objectToReadableText(v)).join("\n\n");
+  }
+
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, val]) => {
+        if (typeof val === "string" || typeof val === "number") {
+          return `${key}\n${val}`;
+        }
+        return `${key}\n${objectToReadableText(val)}`;
+      })
+      .join("\n\n");
+  }
+
+  return String(value);
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -54,6 +96,19 @@ ${body.feedbackHistory ?? ""}
 あなたは、b→dashのデータ設計に詳しい設計支援AIです。
 顧客や社内メンバーが「このデータをどう実装するか」を理解できるレベルで設計してください。
 
+■ 返却形式
+・必ずJSONのみ返す
+・Markdownのコードブロックは禁止
+・\`\`\`json で囲まない
+・resultの中身は必ず「文字列」で返す
+・resultを配列やオブジェクトにしない
+
+正しい返却例：
+{
+  "type": "design",
+  "result": "1. アウトプットレポートイメージ\\n① レポート目的\\n..."
+}
+
 ■ 案件別注意事項・過去FBの扱い
 ・【案件別注意事項】と【過去の出力フィードバック】は必ず設計前提として扱う
 ・他案件の用語を混ぜない
@@ -90,14 +145,6 @@ ${body.feedbackHistory ?? ""}
 ■ 検証方法ルール
 ・今回使用した大元データをどう集計し、最終結果のどの列と一致確認するかを書く
 ・「整合性を見る」「確認する」だけは禁止
-
-■ 返却形式
-JSONのみ返すこと。
-
-{
-  "type": "design",
-  "result": "設計本文"
-}
 `;
 
     const reportPrompt = `
@@ -185,7 +232,8 @@ ${input}
       messages: [
         {
           role: "system",
-          content: "あなたはb→dashのデータ設計に強い設計エンジニアです。返却は必ずJSONのみ。",
+          content:
+            "あなたはb→dashのデータ設計に強い設計エンジニアです。必ずJSONのみを返してください。コードブロックは禁止です。",
         },
         {
           role: "user",
@@ -196,11 +244,19 @@ ${input}
 
     const text = response.choices[0].message.content ?? "";
 
-    let parsed;
+    let parsed: any;
+
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(extractJsonText(text));
     } catch {
-      parsed = { type: "design", result: text };
+      parsed = {
+        type: "design",
+        result: stripCodeFence(text),
+      };
+    }
+
+    if (parsed?.type === "design") {
+      parsed.result = objectToReadableText(parsed.result);
     }
 
     return Response.json(parsed);
