@@ -4,14 +4,26 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+type CandidateData = {
+  dataFile?: string;
+  primaryKey?: string;
+  description?: string;
+  majorColumns?: string;
+};
+
+type RecommendedDataFile = {
+  dataFile: string;
+  reason: string;
+};
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
 
-    const projectName = body.projectName ?? "";
-    const outputType = body.outputType ?? "report";
+    const projectName = String(body.projectName ?? "");
+    const outputType = String(body.outputType ?? "report");
 
-    const candidateData = Array.isArray(body.candidateData)
+    const candidateData: CandidateData[] = Array.isArray(body.candidateData)
       ? body.candidateData
       : [];
 
@@ -36,7 +48,7 @@ ${body.metricDefinition ?? ""}
 候補データ一覧：
 ${candidateData
   .map(
-    (d: any, i: number) => `
+    (d, i) => `
 【${i + 1}】${d.dataFile ?? ""}
 主キー：${d.primaryKey ?? ""}
 概要：${d.description ?? ""}
@@ -47,6 +59,7 @@ ${candidateData
 
 確認事項への回答：
 ${Object.entries(answers)
+  .filter(([, a]) => String(a ?? "").trim() !== "")
   .map(([q, a], i) => `${i + 1}. 質問：${q}\n回答：${a}`)
   .join("\n\n")}
 `;
@@ -64,13 +77,15 @@ ${Object.entries(answers)
 ・候補データ一覧に存在しないカラム名を作らないこと
 ・案件名に関係ない業務用語を使わないこと
 ・他案件の言葉を混ぜないこと
+・推奨理由にも、他案件の言葉を混ぜないこと
+・質問にも、他案件の言葉を混ぜないこと
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ■ 案件別の禁止語・優先語
 ━━━━━━━━━━━━━━━━━━━━━━
 
 【ゴンチャの場合】
-以下の言葉は使わないこと：
+以下の言葉は絶対に使わないこと：
 ・組合員
 ・企画回
 ・生協
@@ -102,33 +117,41 @@ ${Object.entries(answers)
 ■ 推奨データ選定ルール
 ━━━━━━━━━━━━━━━━━━━━━━
 
-・レポート目的と指標定義に必要なデータを選ぶこと
+・レポート目的と指標定義に必要なデータだけを選ぶこと
 ・集計元となる事実データを優先すること
-・会員属性が必要な場合は会員マスタを含めること
-・LINE施策効果を見る場合はLINE行動ログと会員紐付け可能なデータを含めること
-・商品別 / カテゴリ別 / トッピング別を見る場合は明細データを含めること
+・会員属性が必要な場合のみ会員マスタを含めること
+・LINE施策効果を見る場合のみLINE行動ログを含めること
+・商品別 / カテゴリ別を見る場合は注文明細データを含めること
+・トッピング別を見る場合のみトッピング注文明細を含めること
+・すでに会員属性と注文明細が統合されたデータがあり、それだけで目的を満たせる場合は、元の会員一覧と注文明細を重複して選ばないこと
 ・不要なデータは選ばないこと
-・ただし、あとでピボット集計する前提で顧客識別子を保持できるデータは優先すること
+・「念のため」「将来使うかもしれない」という理由で選ばないこと
 
 ━━━━━━━━━━━━━━━━━━━━━━
-■ 確認事項の出し方
+■ 質問の制御ルール（最重要）
 ━━━━━━━━━━━━━━━━━━━━━━
 
-・情報が不足している場合のみ質問を返すこと
-・質問は最大5個
-・質問は「提案形」にすること
-・質問には案件に合った言葉だけを使うこと
-・質問は短く、回答しやすくすること
+・原則として質問は返さないこと
+・質問は「その質問がないとデータを選べない場合のみ」返すこと
+・質問は最大2個まで
+・すでに入力されている内容の再確認は禁止
+・名称や商品名の正誤確認は禁止
+・利用期間の詳細確認は禁止
+・レポート設計フェーズで決めればよい内容は質問しないこと
+・不明点があっても、候補データから合理的に判断できる場合は質問せずに推奨すること
 
-悪い例：
-・比較軸は「企画回のみ」で問題ないですか？
-・組合員属性分析は実施しないで問題ないですか？
+禁止例：
+・いちご杏仁のitem_nameは正しいですか？
+・レポートの日次集計期間はどれくらいですか？
+・この商品名で間違いないですか？
+・分析期間はいつからいつまでですか？
+・組合員属性分析は実施しないで問題ないですか？ ※ゴンチャでは禁止語を含む
 
-ゴンチャでの良い例：
-・比較軸は「注文日」または「注文年月」で問題ないですか？
-・会員属性別の分析は実施しないで問題ないですか？
-・購入金額は「total_amount_in_tax」で問題ないですか？
+許可例：
+・日次と月次のどちらを主軸にしますか？
 ・LINE配信後の来店判定は「配信後7日以内の注文あり」で問題ないですか？
+
+ただし、許可例でもデータ選定に不要なら質問しないこと。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ■ 返却形式
@@ -144,10 +167,7 @@ JSON以外の文章は一切返さないでください。
       "reason": "推奨理由"
     }
   ],
-  "questions": [
-    "確認事項1",
-    "確認事項2"
-  ]
+  "questions": []
 }
 
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -163,7 +183,7 @@ ${input}
         {
           role: "system",
           content:
-            "あなたはb→dashのデータ設計に強い設計エンジニアです。返却は必ずJSONのみで行ってください。他案件の用語を混ぜないでください。",
+            "あなたはb→dashのデータ設計に強い設計エンジニアです。返却は必ずJSONのみ。他案件の用語を混ぜず、原則質問せずに推奨データを選定してください。",
         },
         {
           role: "user",
@@ -181,17 +201,17 @@ ${input}
     } catch {
       parsed = {
         recommendedDataFiles: [],
-        questions: [
-          "推奨データの判定に失敗しました。レポート目的と指標定義をもう少し具体化して再実行してください。",
-        ],
+        questions: [],
       };
     }
 
     const validDataFileNames = new Set(
-      candidateData.map((d: any) => String(d.dataFile ?? ""))
+      candidateData.map((d) => String(d.dataFile ?? ""))
     );
 
-    const recommendedDataFiles = Array.isArray(parsed.recommendedDataFiles)
+    const recommendedDataFiles: RecommendedDataFile[] = Array.isArray(
+      parsed.recommendedDataFiles
+    )
       ? parsed.recommendedDataFiles
           .filter((d: any) => validDataFileNames.has(String(d.dataFile ?? "")))
           .map((d: any) => ({
@@ -201,7 +221,10 @@ ${input}
       : [];
 
     const questions = Array.isArray(parsed.questions)
-      ? parsed.questions.map((q: any) => String(q))
+      ? parsed.questions
+          .map((q: any) => String(q))
+          .filter((q: string) => q.trim() !== "")
+          .slice(0, 2)
       : [];
 
     return Response.json({
