@@ -4,6 +4,9 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const SHEET_ID = "1PMP7lVHbKVEFXI6P8peZdDw77rNTA64N";
+const PROJECT_NOTES_SHEET_NAME = "案件別注意事項";
+
 type CandidateData = {
   dataFile?: string;
   primaryKey?: string;
@@ -11,10 +14,193 @@ type CandidateData = {
   majorColumns?: string;
 };
 
+type ProjectNote = {
+  projectName: string;
+  category: string;
+  note: string;
+  priority: string;
+  isActive: string;
+};
+
 type RecommendedDataFile = {
   dataFile: string;
   reason: string;
 };
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"' && inQuotes && next === '"') {
+      cell += '"';
+      i++;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === "," && !inQuotes) {
+      row.push(cell);
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (cell || row.length > 0) {
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = "";
+      }
+      if (char === "\r" && next === "\n") i++;
+    } else {
+      cell += char;
+    }
+  }
+
+  if (cell || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+async function fetchProjectNotes(projectName: string): Promise<ProjectNote[]> {
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(
+    PROJECT_NOTES_SHEET_NAME
+  )}`;
+
+  const res = await fetch(url, { cache: "no-store" });
+
+  if (!res.ok) return [];
+
+  const csv = await res.text();
+  const rows = parseCsv(csv);
+  const [, ...bodyRows] = rows;
+
+  return bodyRows
+    .map((r) => ({
+      projectName: r[0] ?? "",
+      category: r[1] ?? "",
+      note: r[2] ?? "",
+      priority: r[3] ?? "",
+      isActive: r[4] ?? "",
+    }))
+    .filter(
+      (r) =>
+        r.projectName === projectName &&
+        String(r.isActive).toUpperCase() !== "FALSE"
+    )
+    .sort((a, b) => Number(a.priority || 999) - Number(b.priority || 999));
+}
+
+function normalize(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[（）()【】\[\]・、,。._\-ー]/g, "");
+}
+
+function resolveRecommendedFiles(
+  rawRecommended: any[],
+  candidateData: CandidateData[]
+): RecommendedDataFile[] {
+  const results: RecommendedDataFile[] = [];
+
+  for (const item of rawRecommended) {
+    const aiName = String(item?.dataFile ?? "");
+    const reason = String(item?.reason ?? "");
+
+    const exact = candidateData.find((c) => String(c.dataFile ?? "") === aiName);
+
+    if (exact?.dataFile) {
+      results.push({
+        dataFile: exact.dataFile,
+        reason,
+      });
+      continue;
+    }
+
+    const aiNameNormalized = normalize(aiName);
+
+    const fuzzy = candidateData.find((c) => {
+      const candidateName = String(c.dataFile ?? "");
+      const candidateNameNormalized = normalize(candidateName);
+
+      return (
+        candidateNameNormalized.includes(aiNameNormalized) ||
+        aiNameNormalized.includes(candidateNameNormalized)
+      );
+    });
+
+    if (fuzzy?.dataFile) {
+      results.push({
+        dataFile: fuzzy.dataFile,
+        reason:
+          reason ||
+          "AIの推奨名と候補データ名を照合し、最も近い候補データとして選定しました",
+      });
+    }
+  }
+
+  return Array.from(
+    new Map(results.map((r) => [r.dataFile, r])).values()
+  );
+}
+
+function fallbackRecommend(
+  candidateData: CandidateData[],
+  userText: string
+): RecommendedDataFile[] {
+  const normalizedUserText = normalize(userText);
+
+  const scored = candidateData
+    .map((candidate) => {
+      const dataFile = String(candidate.dataFile ?? "");
+      const text = [
+        candidate.dataFile,
+        candidate.primaryKey,
+        candidate.description,
+        candidate.majorColumns,
+      ]
+        .map((v) => String(v ?? ""))
+        .join(" ");
+
+      const terms = text
+        .split(/[,\s、，]+/)
+        .map((v) => v.trim())
+        .filter((v) => v.length >= 2);
+
+      let score = 0;
+
+      for (const term of terms) {
+        const normalizedTerm = normalize(term);
+        if (normalizedTerm && normalizedUserText.includes(normalizedTerm)) {
+          score += 1;
+        }
+      }
+
+      if (normalizedUserText.includes(normalize(dataFile))) {
+        score += 5;
+      }
+
+      return {
+        dataFile,
+        score,
+        reason:
+          "レポート目的・指標定義と候補データの概要・主要カラムの一致度が高いため",
+      };
+    })
+    .filter((r) => r.dataFile && r.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+
+  return scored.map((r) => ({
+    dataFile: r.dataFile,
+    reason: r.reason,
+  }));
+}
 
 export async function POST(req: Request) {
   try {
@@ -28,6 +214,21 @@ export async function POST(req: Request) {
       : [];
 
     const answers = body.answers ?? {};
+    const projectNotes = await fetchProjectNotes(projectName);
+
+    const projectNotesText = projectNotes
+      .map((n, i) => `【${i + 1}】${n.category}\n${n.note}`)
+      .join("\n\n");
+
+    const userText = `
+${projectName}
+${outputType}
+${body.reportName ?? ""}
+${body.reportPurpose ?? ""}
+${body.metricDefinition ?? ""}
+${Object.values(answers).join("\n")}
+${projectNotesText}
+`;
 
     const input = `
 案件名：
@@ -57,6 +258,9 @@ ${candidateData
   )
   .join("\n")}
 
+案件別注意事項：
+${projectNotesText}
+
 確認事項への回答：
 ${Object.entries(answers)
   .filter(([, a]) => String(a ?? "").trim() !== "")
@@ -75,43 +279,11 @@ ${Object.entries(answers)
 ・候補データ一覧に存在するデータだけを推奨すること
 ・候補データ一覧に存在しないデータ名を作らないこと
 ・候補データ一覧に存在しないカラム名を作らないこと
-・案件名に関係ない業務用語を使わないこと
+・案件別注意事項を必ず優先すること
+・案件別注意事項にある禁止語、推奨語、結合キー、取得できない指標を必ず守ること
 ・他案件の言葉を混ぜないこと
 ・推奨理由にも、他案件の言葉を混ぜないこと
 ・質問にも、他案件の言葉を混ぜないこと
-
-━━━━━━━━━━━━━━━━━━━━━━
-■ 案件別の禁止語・優先語
-━━━━━━━━━━━━━━━━━━━━━━
-
-【ゴンチャの場合】
-以下の言葉は絶対に使わないこと：
-・組合員
-・企画回
-・生協
-・宅配
-・離脱企画回
-
-以下の言葉を使うこと：
-・会員
-・注文
-・購入
-・来店
-・LINE
-・店舗
-・商品
-・トッピング
-・注文日
-・注文年月
-
-【コープデリ / 生協系の場合】
-以下の言葉を使ってよい：
-・組合員
-・企画回
-・宅配
-・注文
-・離脱
-・継続
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ■ 推奨データ選定ルール
@@ -119,39 +291,25 @@ ${Object.entries(answers)
 
 ・レポート目的と指標定義に必要なデータだけを選ぶこと
 ・集計元となる事実データを優先すること
-・会員属性が必要な場合のみ会員マスタを含めること
-・LINE施策効果を見る場合のみLINE行動ログを含めること
-・商品別 / カテゴリ別を見る場合は注文明細データを含めること
-・トッピング別を見る場合のみトッピング注文明細を含めること
-・すでに会員属性と注文明細が統合されたデータがあり、それだけで目的を満たせる場合は、元の会員一覧と注文明細を重複して選ばないこと
+・会員属性や顧客属性が必要な場合のみ、属性マスタを含めること
+・施策効果を見る場合は、施策ログと購買・行動データを紐づけられるデータを含めること
+・商品別 / カテゴリ別を見る場合は、商品明細に相当するデータを含めること
+・すでに統合済みデータがあり、それだけで目的を満たせる場合は、元データを重複して選ばないこと
 ・不要なデータは選ばないこと
 ・「念のため」「将来使うかもしれない」という理由で選ばないこと
 
 ━━━━━━━━━━━━━━━━━━━━━━
-■ 質問の制御ルール（最重要）
+■ 質問の制御ルール
 ━━━━━━━━━━━━━━━━━━━━━━
 
 ・原則として質問は返さないこと
 ・質問は「その質問がないとデータを選べない場合のみ」返すこと
-・質問は最大2個まで
+・質問は最大1個まで
 ・すでに入力されている内容の再確認は禁止
 ・名称や商品名の正誤確認は禁止
 ・利用期間の詳細確認は禁止
 ・レポート設計フェーズで決めればよい内容は質問しないこと
-・不明点があっても、候補データから合理的に判断できる場合は質問せずに推奨すること
-
-禁止例：
-・いちご杏仁のitem_nameは正しいですか？
-・レポートの日次集計期間はどれくらいですか？
-・この商品名で間違いないですか？
-・分析期間はいつからいつまでですか？
-・組合員属性分析は実施しないで問題ないですか？ ※ゴンチャでは禁止語を含む
-
-許可例：
-・日次と月次のどちらを主軸にしますか？
-・LINE配信後の来店判定は「配信後7日以内の注文あり」で問題ないですか？
-
-ただし、許可例でもデータ選定に不要なら質問しないこと。
+・候補データから合理的に判断できる場合は質問せずに推奨すること
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ■ 返却形式
@@ -163,7 +321,7 @@ JSON以外の文章は一切返さないでください。
 {
   "recommendedDataFiles": [
     {
-      "dataFile": "データ名",
+      "dataFile": "候補データ一覧に存在する完全一致のデータ名",
       "reason": "推奨理由"
     }
   ],
@@ -183,7 +341,7 @@ ${input}
         {
           role: "system",
           content:
-            "あなたはb→dashのデータ設計に強い設計エンジニアです。返却は必ずJSONのみ。他案件の用語を混ぜず、原則質問せずに推奨データを選定してください。",
+            "返却は必ずJSONのみ。候補データ名は候補一覧のdataFileを完全一致で返してください。案件別注意事項を最優先してください。",
         },
         {
           role: "user",
@@ -205,27 +363,26 @@ ${input}
       };
     }
 
-    const validDataFileNames = new Set(
-      candidateData.map((d) => String(d.dataFile ?? ""))
+    let recommendedDataFiles = resolveRecommendedFiles(
+      Array.isArray(parsed.recommendedDataFiles)
+        ? parsed.recommendedDataFiles
+        : [],
+      candidateData
     );
 
-    const recommendedDataFiles: RecommendedDataFile[] = Array.isArray(
-      parsed.recommendedDataFiles
-    )
-      ? parsed.recommendedDataFiles
-          .filter((d: any) => validDataFileNames.has(String(d.dataFile ?? "")))
-          .map((d: any) => ({
-            dataFile: String(d.dataFile ?? ""),
-            reason: String(d.reason ?? ""),
-          }))
-      : [];
+    if (recommendedDataFiles.length === 0) {
+      recommendedDataFiles = fallbackRecommend(candidateData, userText);
+    }
 
-    const questions = Array.isArray(parsed.questions)
-      ? parsed.questions
-          .map((q: any) => String(q))
-          .filter((q: string) => q.trim() !== "")
-          .slice(0, 2)
-      : [];
+    const questions =
+      recommendedDataFiles.length > 0
+        ? []
+        : Array.isArray(parsed.questions)
+        ? parsed.questions
+            .map((q: any) => String(q))
+            .filter((q: string) => q.trim() !== "")
+            .slice(0, 1)
+        : [];
 
     return Response.json({
       recommendedDataFiles,
