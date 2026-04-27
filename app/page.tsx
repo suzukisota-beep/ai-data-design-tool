@@ -194,7 +194,10 @@ export default function Home() {
   const [excludeConditions, setExcludeConditions] = useState('');
 
   const [masterData, setMasterData] = useState<MasterRow[]>([]);
+
+  // 初期チェックは必ず空。AI推奨後だけチェックを入れる
   const [selectedDataFiles, setSelectedDataFiles] = useState<string[]>([]);
+
   const [recommendedData, setRecommendedData] = useState<RecommendedRow[]>([]);
   const [recommendQuestions, setRecommendQuestions] = useState<string[]>([]);
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
@@ -231,18 +234,16 @@ export default function Home() {
       .sort((a, b) => Number(a.displayOrder || 999) - Number(b.displayOrder || 999));
   }, [masterData, projectName]);
 
+  // 案件が変わったら、チェックは全部外す
   useEffect(() => {
-    if (projectDataFiles.length > 0) {
-      setSelectedDataFiles([]);
-    } else {
-      setSelectedDataFiles([]);
-    }
-
+    setSelectedDataFiles([]);
     setRecommendedData([]);
     setRecommendQuestions([]);
     setQuestionAnswers({});
+    setSampleRows([]);
+    setProjectNotes([]);
     setResult('');
-  }, [projectDataFiles]);
+  }, [projectName]);
 
   const selectedDataText = useMemo(() => selectedDataFiles.join('、'), [selectedDataFiles]);
 
@@ -316,7 +317,6 @@ export default function Home() {
       projectName,
       reportName,
       reportPurpose,
-      whatToSee: reportPurpose,
       metricDefinition,
       candidateData,
       answers: questionAnswers,
@@ -328,7 +328,6 @@ export default function Home() {
       setRecommendLoading(true);
       setRecommendQuestions([]);
       setRecommendedData([]);
-      setQuestionAnswers({});
       setResult('');
 
       const res = await fetch('/api/recommend-data', {
@@ -348,19 +347,17 @@ export default function Home() {
       setRecommendedData(recommended);
       setRecommendQuestions(questions);
 
-      const names = recommended.map((r: RecommendedRow) => r.dataFile);
-      if (names.length > 0) {
-        setSelectedDataFiles(names);
-      }
+      // AIが推奨したデータだけチェックする
+      const names = recommended
+        .map((r: RecommendedRow) => r.dataFile)
+        .filter((name: string) => projectDataFiles.some((row) => row.dataFile === name));
+
+      setSelectedDataFiles(names);
     } catch (error) {
       alert(`推奨データ取得失敗: ${String(error)}`);
     } finally {
       setRecommendLoading(false);
     }
-  };
-
-  const handleReRecommendData = async () => {
-    await handleRecommendData();
   };
 
   const handleGenerate = async () => {
@@ -495,7 +492,9 @@ export default function Home() {
           <b>確認事項（推奨データ選定時）</b>
           {recommendQuestions.map((q, i) => (
             <div key={q} style={{ marginTop: 10 }}>
-              <div>{i + 1}. {q}</div>
+              <div>
+                {i + 1}. {q}
+              </div>
               <input
                 value={questionAnswers[q] ?? ''}
                 onChange={(e) =>
@@ -509,7 +508,7 @@ export default function Home() {
               />
             </div>
           ))}
-          <button onClick={handleReRecommendData} disabled={recommendLoading}>
+          <button onClick={handleRecommendData} disabled={recommendLoading}>
             回答を踏まえて再判定する
           </button>
         </div>
@@ -520,7 +519,9 @@ export default function Home() {
           <b>AI推奨データ</b>
           {recommendedData.map((row, i) => (
             <div key={i} style={{ marginTop: 10 }}>
-              <div><b>{row.dataFile}</b></div>
+              <div>
+                <b>{row.dataFile}</b>
+              </div>
               <div>理由：{row.reason}</div>
             </div>
           ))}
@@ -530,8 +531,20 @@ export default function Home() {
       {projectDataFiles.length > 0 && (
         <div style={boxStyle}>
           <b>利用可能データ候補</b>
+          <div style={{ marginTop: 6, color: '#555' }}>
+            初期状態ではチェックなし。推奨データを提案すると、必要なデータだけ自動でチェックされます。
+          </div>
+
           {projectDataFiles.map((row) => (
-            <div key={row.dataFile} style={{ border: '1px solid #ddd', padding: 10, marginTop: 10, background: '#fff' }}>
+            <div
+              key={row.dataFile}
+              style={{
+                border: '1px solid #ddd',
+                padding: 10,
+                marginTop: 10,
+                background: '#fff',
+              }}
+            >
               <label style={{ fontWeight: 'bold' }}>
                 <input
                   type="checkbox"
