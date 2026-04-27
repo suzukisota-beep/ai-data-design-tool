@@ -233,11 +233,7 @@ export default function Home() {
 
   useEffect(() => {
     if (projectDataFiles.length > 0) {
-      const defaults = projectDataFiles
-        .filter((row) => String(row.defaultSelected).toUpperCase() === 'TRUE')
-        .map((row) => row.dataFile);
-
-      setSelectedDataFiles(defaults);
+      setSelectedDataFiles([]);
     } else {
       setSelectedDataFiles([]);
     }
