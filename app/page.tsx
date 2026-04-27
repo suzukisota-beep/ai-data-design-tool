@@ -231,8 +231,14 @@ export default function Home() {
   useEffect(() => {
     const fetchMaster = async () => {
       const res = await fetch('/api/master');
-      const data = await res.json();
-      setMasterData(Array.isArray(data) ? data : []);
+      const json = await res.json();
+
+      const rows = Array.isArray(json)
+        ? json
+        : Array.isArray(json.data)
+          ? json.data
+          : [];
+setMasterData(rows);
     };
 
     fetchMaster();
