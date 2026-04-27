@@ -32,6 +32,14 @@ type ProjectNote = {
   isActive: string;
 };
 
+type FeedbackRow = {
+  projectName: string;
+  outputType: string;
+  feedback: string;
+  isActive: string;
+  createdAt: string;
+};
+
 async function fetchSampleData(projectName: string, dataFiles: string[]): Promise<SampleRow[]> {
   if (!projectName || dataFiles.length === 0) return [];
 
@@ -49,6 +57,17 @@ async function fetchProjectNotes(projectName: string): Promise<ProjectNote[]> {
   const res = await fetch(`/api/project-notes?projectName=${encodeURIComponent(projectName)}`);
   const json = await res.json();
 
+  return Array.isArray(json.data) ? json.data : [];
+}
+
+async function fetchFeedbackHistory(projectName: string, outputType: string): Promise<FeedbackRow[]> {
+  if (!projectName || !outputType) return [];
+
+  const res = await fetch(
+    `/api/output-feedback?projectName=${encodeURIComponent(projectName)}&outputType=${encodeURIComponent(outputType)}`
+  );
+
+  const json = await res.json();
   return Array.isArray(json.data) ? json.data : [];
 }
 
@@ -194,8 +213,6 @@ export default function Home() {
   const [excludeConditions, setExcludeConditions] = useState('');
 
   const [masterData, setMasterData] = useState<MasterRow[]>([]);
-
-  // 初期チェックは必ず空。AI推奨後だけチェックを入れる
   const [selectedDataFiles, setSelectedDataFiles] = useState<string[]>([]);
 
   const [recommendedData, setRecommendedData] = useState<RecommendedRow[]>([]);
@@ -203,10 +220,13 @@ export default function Home() {
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   const [sampleRows, setSampleRows] = useState<SampleRow[]>([]);
   const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
+  const [feedbackHistory, setFeedbackHistory] = useState<FeedbackRow[]>([]);
+  const [feedbackText, setFeedbackText] = useState('');
 
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
   const [recommendLoading, setRecommendLoading] = useState(false);
+  const [feedbackSaving, setFeedbackSaving] = useState(false);
 
   useEffect(() => {
     const fetchMaster = async () => {
@@ -234,7 +254,6 @@ export default function Home() {
       .sort((a, b) => Number(a.displayOrder || 999) - Number(b.displayOrder || 999));
   }, [masterData, projectName]);
 
-  // 案件が変わったら、チェックは全部外す
   useEffect(() => {
     setSelectedDataFiles([]);
     setRecommendedData([]);
@@ -242,6 +261,8 @@ export default function Home() {
     setQuestionAnswers({});
     setSampleRows([]);
     setProjectNotes([]);
+    setFeedbackHistory([]);
+    setFeedbackText('');
     setResult('');
   }, [projectName]);
 
@@ -271,6 +292,12 @@ export default function Home() {
       .join('\n\n');
   }, [projectNotes]);
 
+  const feedbackHistoryText = useMemo(() => {
+    return feedbackHistory
+      .map((row, index) => `【${index + 1}】${row.createdAt}\n${row.feedback}`)
+      .join('\n\n');
+  }, [feedbackHistory]);
+
   const answeredQuestionsText = useMemo(() => {
     return Object.entries(questionAnswers)
       .filter(([, answer]) => answer.trim() !== '')
@@ -283,20 +310,23 @@ export default function Home() {
       if (!projectName) {
         setSampleRows([]);
         setProjectNotes([]);
+        setFeedbackHistory([]);
         return;
       }
 
-      const [samples, notes] = await Promise.all([
+      const [samples, notes, feedbacks] = await Promise.all([
         fetchSampleData(projectName, selectedDataFiles),
         fetchProjectNotes(projectName),
+        fetchFeedbackHistory(projectName, outputType),
       ]);
 
       setSampleRows(samples);
       setProjectNotes(notes);
+      setFeedbackHistory(feedbacks);
     };
 
     loadContext();
-  }, [projectName, selectedDataFiles]);
+  }, [projectName, selectedDataFiles, outputType]);
 
   const handleToggleDataFile = (fileName: string) => {
     setSelectedDataFiles((prev) =>
@@ -347,7 +377,6 @@ export default function Home() {
       setRecommendedData(recommended);
       setRecommendQuestions(questions);
 
-      // AIが推奨したデータだけチェックする
       const names = recommended
         .map((r: RecommendedRow) => r.dataFile)
         .filter((name: string) => projectDataFiles.some((row) => row.dataFile === name));
@@ -357,6 +386,50 @@ export default function Home() {
       alert(`推奨データ取得失敗: ${String(error)}`);
     } finally {
       setRecommendLoading(false);
+    }
+  };
+
+  const handleSaveFeedback = async () => {
+    if (!projectName) {
+      alert('案件名を選択してください');
+      return;
+    }
+
+    if (!feedbackText.trim()) {
+      alert('フィードバックを入力してください');
+      return;
+    }
+
+    try {
+      setFeedbackSaving(true);
+
+      const res = await fetch('/api/output-feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectName,
+          outputType,
+          feedback: feedbackText.trim(),
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || data.ok === false) {
+        alert(`フィードバック保存に失敗しました: ${JSON.stringify(data)}`);
+        return;
+      }
+
+      setFeedbackText('');
+
+      const feedbacks = await fetchFeedbackHistory(projectName, outputType);
+      setFeedbackHistory(feedbacks);
+
+      alert('フィードバックを保存しました');
+    } catch (error) {
+      alert(`フィードバック保存中にエラーが発生しました: ${String(error)}`);
+    } finally {
+      setFeedbackSaving(false);
     }
   };
 
@@ -378,6 +451,7 @@ export default function Home() {
         projectDataText,
         sampleDataFromMaster: sampleDataText,
         projectNotes: projectNotesText,
+        feedbackHistory: feedbackHistoryText,
       };
 
       const res = await fetch('/api/generate', {
@@ -593,7 +667,45 @@ export default function Home() {
         {loading ? '生成中...' : '生成する'}
       </button>
 
-      <br />
+      <div style={{ ...boxStyle, marginTop: 20, background: '#f7f7f7' }}>
+        <b>出力へのフィードバック</b>
+        <div style={{ marginTop: 6, color: '#555' }}>
+          出力結果で「おかしい」「次回から直したい」と思った内容を保存できます。
+          保存した内容は、同じ案件・同じ作成種別の次回生成時にAIへ渡されます。
+        </div>
+
+        <textarea
+          value={feedbackText}
+          onChange={(e) => setFeedbackText(e.target.value)}
+          style={{ ...textareaStyle, minHeight: '80px' }}
+          placeholder="例：レポートサンプルは必ずテーブル形式にする。不要なデータを利用データに含めない。"
+        />
+
+        <button onClick={handleSaveFeedback} disabled={feedbackSaving || !projectName}>
+          {feedbackSaving ? '保存中...' : 'フィードバックを保存'}
+        </button>
+
+        {feedbackHistory.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <b>保存済みフィードバック</b>
+            {feedbackHistory.map((row, i) => (
+              <div
+                key={`${row.createdAt}-${i}`}
+                style={{
+                  border: '1px solid #ddd',
+                  background: '#fff',
+                  padding: 8,
+                  marginTop: 8,
+                }}
+              >
+                <div style={{ color: '#666', fontSize: 12 }}>{row.createdAt}</div>
+                <div style={{ whiteSpace: 'pre-wrap' }}>{row.feedback}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <br />
 
       <div style={{ border: '1px solid #ccc', padding: 12, minHeight: 240, background: '#fff' }}>
