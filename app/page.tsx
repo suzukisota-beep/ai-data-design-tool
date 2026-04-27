@@ -13,6 +13,11 @@ type MasterRow = {
   isActive: string;
 };
 
+type RecommendedRow = {
+  dataFile: string;
+  reason: string;
+};
+
 type SampleRow = {
   projectName: string;
   dataFile: string;
@@ -27,7 +32,7 @@ type ProjectNote = {
   isActive: string;
 };
 
-async function fetchSampleData(projectName: string, dataFiles: string[]) {
+async function fetchSampleData(projectName: string, dataFiles: string[]): Promise<SampleRow[]> {
   if (!projectName || dataFiles.length === 0) return [];
 
   const res = await fetch(
@@ -38,14 +43,12 @@ async function fetchSampleData(projectName: string, dataFiles: string[]) {
   return Array.isArray(json.data) ? json.data : [];
 }
 
-async function fetchProjectNotes(projectName: string) {
+async function fetchProjectNotes(projectName: string): Promise<ProjectNote[]> {
   if (!projectName) return [];
 
-  const res = await fetch(
-    `/api/project-notes?projectName=${encodeURIComponent(projectName)}`
-  );
-
+  const res = await fetch(`/api/project-notes?projectName=${encodeURIComponent(projectName)}`);
   const json = await res.json();
+
   return Array.isArray(json.data) ? json.data : [];
 }
 
@@ -186,17 +189,21 @@ export default function Home() {
   const [outputType, setOutputType] = useState<'report' | 'segment'>('report');
   const [reportName, setReportName] = useState('');
   const [reportPurpose, setReportPurpose] = useState('');
-  const [whatToSee, setWhatToSee] = useState('');
   const [metricDefinition, setMetricDefinition] = useState('');
   const [period, setPeriod] = useState('');
   const [excludeConditions, setExcludeConditions] = useState('');
 
   const [masterData, setMasterData] = useState<MasterRow[]>([]);
+  const [selectedDataFiles, setSelectedDataFiles] = useState<string[]>([]);
+  const [recommendedData, setRecommendedData] = useState<RecommendedRow[]>([]);
+  const [recommendQuestions, setRecommendQuestions] = useState<string[]>([]);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
   const [sampleRows, setSampleRows] = useState<SampleRow[]>([]);
   const [projectNotes, setProjectNotes] = useState<ProjectNote[]>([]);
 
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
+  const [recommendLoading, setRecommendLoading] = useState(false);
 
   useEffect(() => {
     const fetchMaster = async () => {
@@ -209,9 +216,9 @@ export default function Home() {
   }, []);
 
   const projectOptions = useMemo(() => {
-    return Array.from(
-      new Set(masterData.map((row) => row.projectName).filter(Boolean))
-    ).sort((a, b) => a.localeCompare(b, 'ja'));
+    return Array.from(new Set(masterData.map((row) => row.projectName).filter(Boolean))).sort((a, b) =>
+      a.localeCompare(b, 'ja')
+    );
   }, [masterData]);
 
   const projectDataFiles = useMemo(() => {
@@ -224,9 +231,24 @@ export default function Home() {
       .sort((a, b) => Number(a.displayOrder || 999) - Number(b.displayOrder || 999));
   }, [masterData, projectName]);
 
-  const dataFileNames = useMemo(() => {
-    return projectDataFiles.map((row) => row.dataFile);
+  useEffect(() => {
+    if (projectDataFiles.length > 0) {
+      const defaults = projectDataFiles
+        .filter((row) => String(row.defaultSelected).toUpperCase() === 'TRUE')
+        .map((row) => row.dataFile);
+
+      setSelectedDataFiles(defaults);
+    } else {
+      setSelectedDataFiles([]);
+    }
+
+    setRecommendedData([]);
+    setRecommendQuestions([]);
+    setQuestionAnswers({});
+    setResult('');
   }, [projectDataFiles]);
+
+  const selectedDataText = useMemo(() => selectedDataFiles.join('、'), [selectedDataFiles]);
 
   const projectDataText = useMemo(() => {
     return projectDataFiles
@@ -252,10 +274,15 @@ export default function Home() {
       .join('\n\n');
   }, [projectNotes]);
 
+  const answeredQuestionsText = useMemo(() => {
+    return Object.entries(questionAnswers)
+      .filter(([, answer]) => answer.trim() !== '')
+      .map(([question, answer], index) => `${index + 1}. 質問：${question}\n回答：${answer}`)
+      .join('\n\n');
+  }, [questionAnswers]);
+
   useEffect(() => {
     const loadContext = async () => {
-      setResult('');
-
       if (!projectName) {
         setSampleRows([]);
         setProjectNotes([]);
@@ -263,7 +290,7 @@ export default function Home() {
       }
 
       const [samples, notes] = await Promise.all([
-        fetchSampleData(projectName, dataFileNames),
+        fetchSampleData(projectName, selectedDataFiles),
         fetchProjectNotes(projectName),
       ]);
 
@@ -272,7 +299,73 @@ export default function Home() {
     };
 
     loadContext();
-  }, [projectName, dataFileNames]);
+  }, [projectName, selectedDataFiles]);
+
+  const handleToggleDataFile = (fileName: string) => {
+    setSelectedDataFiles((prev) =>
+      prev.includes(fileName) ? prev.filter((v) => v !== fileName) : [...prev, fileName]
+    );
+  };
+
+  const buildRecommendPayload = () => {
+    const candidateData = projectDataFiles.map((row) => ({
+      dataFile: row.dataFile,
+      primaryKey: row.primaryKey,
+      description: row.description,
+      majorColumns: row.majorColumns,
+    }));
+
+    return {
+      outputType,
+      projectName,
+      reportName,
+      reportPurpose,
+      whatToSee: reportPurpose,
+      metricDefinition,
+      candidateData,
+      answers: questionAnswers,
+    };
+  };
+
+  const handleRecommendData = async () => {
+    try {
+      setRecommendLoading(true);
+      setRecommendQuestions([]);
+      setRecommendedData([]);
+      setQuestionAnswers({});
+      setResult('');
+
+      const res = await fetch('/api/recommend-data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildRecommendPayload()),
+      });
+
+      const data = await res.json();
+
+      const recommended = Array.isArray(data.recommendedDataFiles)
+        ? data.recommendedDataFiles
+        : [];
+
+      const questions = Array.isArray(data.questions) ? data.questions : [];
+
+      setRecommendedData(recommended);
+      setRecommendQuestions(questions);
+
+      const names = recommended.map((r: RecommendedRow) => r.dataFile);
+      if (names.length > 0) {
+        setSelectedDataFiles(names);
+      }
+    } catch (error) {
+      alert(`推奨データ取得失敗: ${String(error)}`);
+    } finally {
+      setRecommendLoading(false);
+    }
+  };
+
+  const handleReRecommendData = async () => {
+    await handleRecommendData();
+  };
 
   const handleGenerate = async () => {
     try {
@@ -284,11 +377,11 @@ export default function Home() {
         projectName,
         reportName,
         reportPurpose,
-        whatToSee,
         metricDefinition,
         period,
         excludeConditions,
-        dataFiles: dataFileNames.join('、'),
+        dataFiles: selectedDataText,
+        answeredQuestions: answeredQuestionsText,
         projectDataText,
         sampleDataFromMaster: sampleDataText,
         projectNotes: projectNotesText,
@@ -341,6 +434,14 @@ export default function Home() {
     boxSizing: 'border-box' as const,
   };
 
+  const boxStyle = {
+    border: '1px solid #ccc',
+    padding: '12px',
+    marginTop: '8px',
+    marginBottom: '12px',
+    background: '#fafafa',
+  };
+
   return (
     <div style={{ padding: 20, maxWidth: 1100, margin: '0 auto' }}>
       <h1>AIデータ設計ツール</h1>
@@ -381,14 +482,6 @@ export default function Home() {
         placeholder="例：LINE配信後に来店や購買が増えているかを確認したい"
       />
 
-      <label>{outputType === 'report' ? '見たいこと' : '作りたい条件'}</label>
-      <textarea
-        value={whatToSee}
-        onChange={(e) => setWhatToSee(e.target.value)}
-        style={textareaStyle}
-        placeholder="例：LINEコンテンツ別に配信後7日以内の来店率と売上を見たい"
-      />
-
       <label>{outputType === 'report' ? '指標定義' : '判定定義'}</label>
       <textarea
         value={metricDefinition}
@@ -396,6 +489,72 @@ export default function Home() {
         style={textareaStyle}
         placeholder="例：来店率＝配信後7日以内に注文がある会員数 ÷ 配信成功会員数"
       />
+
+      <button onClick={handleRecommendData} disabled={recommendLoading || !projectName}>
+        {recommendLoading ? '推奨データ選定中...' : '推奨データを提案'}
+      </button>
+
+      {recommendQuestions.length > 0 && (
+        <div style={{ ...boxStyle, background: '#fff8e1' }}>
+          <b>確認事項（推奨データ選定時）</b>
+          {recommendQuestions.map((q, i) => (
+            <div key={q} style={{ marginTop: 10 }}>
+              <div>{i + 1}. {q}</div>
+              <input
+                value={questionAnswers[q] ?? ''}
+                onChange={(e) =>
+                  setQuestionAnswers((prev) => ({
+                    ...prev,
+                    [q]: e.target.value,
+                  }))
+                }
+                style={inputStyle}
+                placeholder="ここに回答を入力"
+              />
+            </div>
+          ))}
+          <button onClick={handleReRecommendData} disabled={recommendLoading}>
+            回答を踏まえて再判定する
+          </button>
+        </div>
+      )}
+
+      {recommendedData.length > 0 && (
+        <div style={{ ...boxStyle, background: '#eef7ff' }}>
+          <b>AI推奨データ</b>
+          {recommendedData.map((row, i) => (
+            <div key={i} style={{ marginTop: 10 }}>
+              <div><b>{row.dataFile}</b></div>
+              <div>理由：{row.reason}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {projectDataFiles.length > 0 && (
+        <div style={boxStyle}>
+          <b>利用可能データ候補</b>
+          {projectDataFiles.map((row) => (
+            <div key={row.dataFile} style={{ border: '1px solid #ddd', padding: 10, marginTop: 10, background: '#fff' }}>
+              <label style={{ fontWeight: 'bold' }}>
+                <input
+                  type="checkbox"
+                  checked={selectedDataFiles.includes(row.dataFile)}
+                  onChange={() => handleToggleDataFile(row.dataFile)}
+                  style={{ marginRight: 8 }}
+                />
+                {row.dataFile}
+              </label>
+              <div>主キー：{row.primaryKey}</div>
+              <div>概要：{row.description}</div>
+              <div>主要カラム：{row.majorColumns}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <label>利用するデータ（確定結果）</label>
+      <textarea value={selectedDataText} readOnly style={textareaStyle} />
 
       <label>利用期間</label>
       <input
@@ -411,6 +570,14 @@ export default function Home() {
         onChange={(e) => setExcludeConditions(e.target.value)}
         style={textareaStyle}
         placeholder="例：membership_card_noが空の注文、LINEユーザIDが会員一覧に存在しないログを除外"
+      />
+
+      <label>自動取得サンプルデータ（選択中データに対応）</label>
+      <textarea
+        value={sampleDataText}
+        readOnly
+        style={{ ...textareaStyle, minHeight: '220px' }}
+        placeholder="選択されたデータに応じて自動表示されます"
       />
 
       <button onClick={handleGenerate} disabled={loading || !projectName}>
