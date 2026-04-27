@@ -4,112 +4,143 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-function isBlank(value: unknown) {
-  return !value || String(value).trim() === "";
-}
-
-function hasKeyword(text: string, keywords: string[]) {
-  return keywords.some((keyword) => text.includes(keyword));
-}
-
 export async function POST(req: Request) {
   try {
     const body = await req.json();
 
     const projectName = body.projectName ?? "";
-    const reportName = body.reportName ?? "";
-    const reportPurpose = body.reportPurpose ?? "";
-    const whatToSee = body.whatToSee ?? "";
-    const metricDefinition = body.metricDefinition ?? "";
-    const candidateData = Array.isArray(body.candidateData) ? body.candidateData : [];
+    const outputType = body.outputType ?? "report";
+
+    const candidateData = Array.isArray(body.candidateData)
+      ? body.candidateData
+      : [];
+
     const answers = body.answers ?? {};
 
-    const allText = `
+    const input = `
+案件名：
 ${projectName}
-${reportName}
-${reportPurpose}
-${whatToSee}
-${metricDefinition}
-${JSON.stringify(answers)}
+
+作成したいもの：
+${outputType === "segment" ? "セグメント用データ" : "レポート用データ"}
+
+名称：
+${body.reportName ?? ""}
+
+目的：
+${body.reportPurpose ?? ""}
+
+指標定義 / 判定定義：
+${body.metricDefinition ?? ""}
+
+候補データ一覧：
+${candidateData
+  .map(
+    (d: any, i: number) => `
+【${i + 1}】${d.dataFile ?? ""}
+主キー：${d.primaryKey ?? ""}
+概要：${d.description ?? ""}
+主要カラム：${d.majorColumns ?? ""}
+`
+  )
+  .join("\n")}
+
+確認事項への回答：
+${Object.entries(answers)
+  .map(([q, a], i) => `${i + 1}. 質問：${q}\n回答：${a}`)
+  .join("\n\n")}
 `;
 
-    const questions: string[] = [];
-
-    // 1. 売上定義
-    if (isBlank(metricDefinition)) {
-      questions.push("売上は「注文金額」で集計する想定で問題ないですか？（異なる場合は修正してください）");
-    }
-
-    // 2. 期間
-    if (
-      isBlank(answers["分析する期間は「指定なし」で問題ないですか？（特定期間がある場合は記載してください）"]) &&
-      isBlank(answers["分析期間は「直近1年」で問題ないですか？（異なる場合は修正してください）"]) &&
-      !hasKeyword(allText, ["2024", "2025", "年月", "月次", "週次", "日次", "期間"])
-    ) {
-      questions.push("分析する期間は「指定なし」で問題ないですか？（特定期間がある場合は記載してください）");
-    }
-
-    // 3. 比較軸
-    if (
-      isBlank(answers["比較軸は「企画回のみ」で問題ないですか？（他に必要な軸があれば記載してください）"]) &&
-      !hasKeyword(allText, ["年代別", "会員別", "商品別", "カテゴリ別", "店舗別", "エリア別", "属性別", "企画回別"])
-    ) {
-      questions.push("比較軸は「企画回のみ」で問題ないですか？（他に必要な軸があれば記載してください）");
-    }
-
-    // 4. 企画回の扱い
-    if (
-      hasKeyword(allText, ["企画回", "企画年月", "企画月別"]) &&
-      isBlank(answers["企画回は「受注企画回」カラムを使う想定で問題ないですか？（異なる場合は修正してください）"])
-    ) {
-      questions.push("企画回は「受注企画回」カラムを使う想定で問題ないですか？（異なる場合は修正してください）");
-    }
-
-    // 5. 属性分析の有無
-    if (
-      isBlank(answers["組合員属性分析は「実施しない」で問題ないですか？（年代などで分析したい場合は記載してください）"]) &&
-      !hasKeyword(allText, ["属性別", "年代別", "会員別"])
-    ) {
-      questions.push("組合員属性分析は「実施しない」で問題ないですか？（年代などで分析したい場合は記載してください）");
-    }
-
-    const uniqueQuestions = Array.from(new Set(questions)).slice(0, 5);
-
     const prompt = `
-あなたは、b→dash案件のデータ設計に強い設計支援AIです。
-あなたの役割は、レポート要件に対して「どのデータが必要か」を選定することです。
+あなたは、b→dashのデータ設計に詳しいデータ設計エンジニアです。
+ユーザーが作成したいレポート / セグメントに対して、利用すべきデータを候補一覧から選定してください。
 
-━━━━━━━━━━━━━━━━━━━━━━━
-【最重要ルール】
-━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━
+■ 最重要ルール
+━━━━━━━━━━━━━━━━━━━━━━
 
-■ 候補データの中からだけ選ぶこと
-・必ず「利用可能なデータ候補」の中から選ぶこと
-・候補にないデータを勝手に追加しないこと
+・候補データ一覧に存在するデータだけを推奨すること
+・候補データ一覧に存在しないデータ名を作らないこと
+・候補データ一覧に存在しないカラム名を作らないこと
+・案件名に関係ない業務用語を使わないこと
+・他案件の言葉を混ぜないこと
 
-■ 最低限ではなく、分析として成立する粒度で選ぶこと
-・単に集計できるだけでなく、レポート目的・見たいこと・指標定義を満たすために必要なデータを選ぶこと
-・比較軸、切り口、分類、時系列集計に必要なデータも含めて選ぶこと
+━━━━━━━━━━━━━━━━━━━━━━
+■ 案件別の禁止語・優先語
+━━━━━━━━━━━━━━━━━━━━━━
 
-■ 追加回答を必ず考慮すること
-・【追加回答】に値が入っている項目は、必ずそれを前提に判断すること
-・すでに回答済みの内容について、同じ確認事項を繰り返さないこと
+【ゴンチャの場合】
+以下の言葉は使わないこと：
+・組合員
+・企画回
+・生協
+・宅配
+・離脱企画回
 
-■ 推奨理由は簡潔にすること
-・reason は1文で書くこと
-・「何のために必要か」が分かるようにすること
+以下の言葉を使うこと：
+・会員
+・注文
+・購入
+・来店
+・LINE
+・店舗
+・商品
+・トッピング
+・注文日
+・注文年月
 
-━━━━━━━━━━━━━━━━━━━━━━━
-【返却形式】
-━━━━━━━━━━━━━━━━━━━━━━━
+【コープデリ / 生協系の場合】
+以下の言葉を使ってよい：
+・組合員
+・企画回
+・宅配
+・注文
+・離脱
+・継続
 
-必ずJSONのみで返すこと。
-JSON以外の説明文は一切つけないこと。
+━━━━━━━━━━━━━━━━━━━━━━
+■ 推奨データ選定ルール
+━━━━━━━━━━━━━━━━━━━━━━
+
+・レポート目的と指標定義に必要なデータを選ぶこと
+・集計元となる事実データを優先すること
+・会員属性が必要な場合は会員マスタを含めること
+・LINE施策効果を見る場合はLINE行動ログと会員紐付け可能なデータを含めること
+・商品別 / カテゴリ別 / トッピング別を見る場合は明細データを含めること
+・不要なデータは選ばないこと
+・ただし、あとでピボット集計する前提で顧客識別子を保持できるデータは優先すること
+
+━━━━━━━━━━━━━━━━━━━━━━
+■ 確認事項の出し方
+━━━━━━━━━━━━━━━━━━━━━━
+
+・情報が不足している場合のみ質問を返すこと
+・質問は最大5個
+・質問は「提案形」にすること
+・質問には案件に合った言葉だけを使うこと
+・質問は短く、回答しやすくすること
+
+悪い例：
+・比較軸は「企画回のみ」で問題ないですか？
+・組合員属性分析は実施しないで問題ないですか？
+
+ゴンチャでの良い例：
+・比較軸は「注文日」または「注文年月」で問題ないですか？
+・会員属性別の分析は実施しないで問題ないですか？
+・購入金額は「total_amount_in_tax」で問題ないですか？
+・LINE配信後の来店判定は「配信後7日以内の注文あり」で問題ないですか？
+
+━━━━━━━━━━━━━━━━━━━━━━
+■ 返却形式
+━━━━━━━━━━━━━━━━━━━━━━
+
+必ずJSONのみを返してください。
+JSON以外の文章は一切返さないでください。
 
 {
   "recommendedDataFiles": [
     {
-      "dataFile": "データファイル名",
+      "dataFile": "データ名",
       "reason": "推奨理由"
     }
   ],
@@ -119,59 +150,11 @@ JSON以外の説明文は一切つけないこと。
   ]
 }
 
-━━━━━━━━━━━━━━━━━━━━━━━
-【出力判断ルール】
-━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━
+■ 今回の入力
+━━━━━━━━━━━━━━━━━━━━━━
 
-・questions が空でもよい
-・recommendedDataFiles は空にしないこと。候補の中から現時点で最も妥当なものを選ぶこと
-・ただし、分析を成立させるうえで不足があるなら questions に必ず書くこと
-・質問ではなく「提案して確認する形」を優先すること
-・たとえば「売上の定義は何ですか？」ではなく、「売上は注文金額で問題ないですか？」とすること
-・たとえば「期間はどうしますか？」ではなく、「分析期間は指定なしで問題ないですか？」とすること
-・たとえば「属性分析しますか？」ではなく、「組合員属性分析は実施しない想定で問題ないですか？」とすること
-
-━━━━━━━━━━━━━━━━━━━━━━━
-【案件名】
-━━━━━━━━━━━━━━━━━━━━━━━
-
-${projectName}
-
-━━━━━━━━━━━━━━━━━━━━━━━
-【レポート名】
-━━━━━━━━━━━━━━━━━━━━━━━
-
-${reportName}
-
-━━━━━━━━━━━━━━━━━━━━━━━
-【レポート目的】
-━━━━━━━━━━━━━━━━━━━━━━━
-
-${reportPurpose}
-
-━━━━━━━━━━━━━━━━━━━━━━━
-【見たいこと】
-━━━━━━━━━━━━━━━━━━━━━━━
-
-${whatToSee}
-
-━━━━━━━━━━━━━━━━━━━━━━━
-【指標定義】
-━━━━━━━━━━━━━━━━━━━━━━━
-
-${metricDefinition}
-
-━━━━━━━━━━━━━━━━━━━━━━━
-【追加回答】
-━━━━━━━━━━━━━━━━━━━━━━━
-
-${JSON.stringify(answers, null, 2)}
-
-━━━━━━━━━━━━━━━━━━━━━━━
-【利用可能なデータ候補】
-━━━━━━━━━━━━━━━━━━━━━━━
-
-${JSON.stringify(candidateData, null, 2)}
+${input}
 `;
 
     const response = await openai.chat.completions.create({
@@ -180,7 +163,7 @@ ${JSON.stringify(candidateData, null, 2)}
         {
           role: "system",
           content:
-            "あなたはb→dash案件のデータ選定に強い設計支援AIです。返却は必ずJSONのみです。",
+            "あなたはb→dashのデータ設計に強い設計エンジニアです。返却は必ずJSONのみで行ってください。他案件の用語を混ぜないでください。",
         },
         {
           role: "user",
@@ -191,30 +174,44 @@ ${JSON.stringify(candidateData, null, 2)}
 
     const text = response.choices[0].message.content ?? "";
 
-    let parsed;
+    let parsed: any;
+
     try {
       parsed = JSON.parse(text);
     } catch {
       parsed = {
         recommendedDataFiles: [],
-        questions: ["推奨内容は以下の想定で問題ないですか？（必要なら修正してください）"],
+        questions: [
+          "推奨データの判定に失敗しました。レポート目的と指標定義をもう少し具体化して再実行してください。",
+        ],
       };
     }
 
+    const validDataFileNames = new Set(
+      candidateData.map((d: any) => String(d.dataFile ?? ""))
+    );
+
+    const recommendedDataFiles = Array.isArray(parsed.recommendedDataFiles)
+      ? parsed.recommendedDataFiles
+          .filter((d: any) => validDataFileNames.has(String(d.dataFile ?? "")))
+          .map((d: any) => ({
+            dataFile: String(d.dataFile ?? ""),
+            reason: String(d.reason ?? ""),
+          }))
+      : [];
+
+    const questions = Array.isArray(parsed.questions)
+      ? parsed.questions.map((q: any) => String(q))
+      : [];
+
     return Response.json({
-      recommendedDataFiles: Array.isArray(parsed.recommendedDataFiles)
-        ? parsed.recommendedDataFiles
-        : [],
-      questions: uniqueQuestions.length > 0
-        ? uniqueQuestions
-        : Array.isArray(parsed.questions)
-        ? parsed.questions
-        : [],
+      recommendedDataFiles,
+      questions,
     });
   } catch (error) {
     return Response.json(
       {
-        error: "推奨データの取得に失敗しました",
+        error: "推奨データ選定中にエラーが発生しました",
         detail: String(error),
       },
       { status: 500 }
